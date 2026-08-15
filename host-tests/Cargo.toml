@@ -1,0 +1,12 @@
+# Host 侧单测 crate：把 no_std 的纯逻辑模块原样编译到本机跑测试
+# （主 crate 锁定 riscv32imac target，无法直接 `cargo test`）。
+# 运行：cd host-tests && cargo test
+[package]
+name = "laoda-host-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# 与主 crate 相同的 feature 集，保证被测代码路径一致
+time = { version = "0.3", default-features = false }
