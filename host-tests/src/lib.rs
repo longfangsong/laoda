@@ -5,6 +5,9 @@
 #[path = "../../src/data/countdown.rs"]
 mod countdown;
 
+#[path = "../../src/util.rs"]
+mod util;
+
 use countdown::{
     CountDownItem, Unit, build_items, day_remaining_secs, release_remaining_secs,
     release_total_secs, week_remaining_secs, year_remaining_secs,
@@ -116,4 +119,32 @@ fn visibility_and_rounding() {
     };
     assert_eq!(it.value(), 1);
     assert!(it.visible());
+}
+
+// ---- 用量推送行解析（设计文档 §8） ----
+
+#[test]
+fn parse_usage_push_valid() {
+    let (usage, epoch) =
+        util::parse_usage_push("laoda1 tok 42 77 13 1786000000\n", "tok").unwrap();
+    assert_eq!(usage, [42, 77, 13]);
+    assert_eq!(epoch, 1_786_000_000);
+    // 边界值合法；字段间任意空白
+    assert_eq!(
+        util::parse_usage_push("laoda1 tok   0   100   0  0", "tok").unwrap(),
+        ([0u8, 100, 0], 0u64)
+    );
+}
+
+#[test]
+fn parse_usage_push_rejects() {
+    let ok = "laoda1 tok 42 77 13 1786000000";
+    assert!(util::parse_usage_push(ok, "wrong").is_none()); // token 不匹配
+    assert!(util::parse_usage_push(ok, "").is_none()); // token 为空 = 禁用
+    assert!(util::parse_usage_push("laoda2 tok 42 77 13 1786000000", "tok").is_none()); // magic
+    assert!(util::parse_usage_push("laoda1 tok 42 77 13", "tok").is_none()); // 缺 epoch
+    assert!(util::parse_usage_push("laoda1 tok 42 77 13 1786000000 x", "tok").is_none()); // 多字段
+    assert!(util::parse_usage_push("laoda1 tok 101 77 13 1786000000", "tok").is_none()); // >100
+    assert!(util::parse_usage_push("laoda1 tok 42 abc 13 1786000000", "tok").is_none()); // 非数字
+    assert!(util::parse_usage_push("laoda1 tok 42 77 13 -5", "tok").is_none()); // 负 epoch
 }

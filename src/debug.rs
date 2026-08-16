@@ -16,8 +16,8 @@
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_hal::Blocking;
+use esp_hal::usb_serial_jtag::UsbSerialJtag;
 
 use crate::data::{Clock, STATE, modify_state};
 
@@ -84,7 +84,10 @@ fn handle_line(line: &[u8], usj: &mut UsbSerialJtag<'_, Blocking>) {
                 let _ = write!(usj, "debug: 已清除时间覆盖，NTP 将重新对时\n");
             }
             "" => {
-                let _ = write!(usj, "debug: 用法: time <unix-seconds> | time | time reset\n");
+                let _ = write!(
+                    usj,
+                    "debug: 用法: time <unix-seconds> | time | time reset\n"
+                );
             }
             rest => match rest.parse::<u64>() {
                 Ok(unix) => {

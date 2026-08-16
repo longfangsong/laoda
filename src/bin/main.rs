@@ -27,12 +27,13 @@ use esp_hal::spi::Mode;
 use esp_hal::spi::master::{Config as SpiConfig, Spi, SpiDmaBus};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
+use laoda::data::Freshness;
 use laoda::data::STATE;
 use laoda::data::countdown::build_items;
 use laoda::device::lcd::Lcd;
 use laoda::driver::ws2812::Ws2812;
 use laoda::net;
-use laoda::ui::page::claude_usage::{ClaudeUsage, GAUGE_COUNT, UsageItem};
+use laoda::ui::page::claude_usage::{ClaudeUsage, UsageData};
 use laoda::ui::page::count_down::{CountDown, CountDownData};
 use laoda::ui::theme;
 use log::info;
@@ -47,15 +48,8 @@ extern crate alloc;
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
-/// 用量页面上的三个仪表盘。百分比是初值，demo 里每秒会被覆盖。
-const USAGE: [UsageItem; GAUGE_COUNT] = [
-    UsageItem::new("Session", 0.42),
-    UsageItem::new("Week", 0.77),
-    UsageItem::new("Fable", 0.13),
-];
-
-/// demo 数据推进的间隔
-const DATA_TICK: Duration = Duration::from_secs(1);
+/// 倒计时页的 `Day` 以秒计，最多每秒重绘一次（事件驱动边界见设计文档 §10/§15 第 8 步）
+const REDRAW_TICK: Duration = Duration::from_secs(1);
 /// 无人按键时自动切页的间隔
 const AUTO_SWITCH: Duration = Duration::from_secs(5);
 /// 按键去抖窗口
@@ -139,7 +133,9 @@ async fn main(spawner: Spawner) -> ! {
     let _ = peripherals.GPIO29;
     let _ = peripherals.GPIO30;
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 65536);
+    // 96KB：WiFi 运行期分配 ~60KB 峰值，mDNS（hick 引擎）另需几 KB。
+    // 从 RECLAIMED（bootloader 腾出的 64KB）挪进主 DRAM 并扩大。
+    esp_alloc::heap_allocator!(size: 98304);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -155,6 +151,8 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(net::stack::net_task(net_runner).unwrap());
     spawner.spawn(net::wifi::wifi_task(wifi_controller).unwrap());
     spawner.spawn(net::sntp::sntp_task(net_stack).unwrap());
+    spawner.spawn(net::push::push_task(net_stack).unwrap());
+    spawner.spawn(net::mdns::mdns_task(net_stack).unwrap());
 
     // 串口调试接口（仅 debug 构建）：走 Type-C 原生 USB（USB-Serial-JTAG，
     // 与日志同一端口），`time <unix-秒>` 覆盖 NTP 时间，见 laoda::debug
@@ -223,17 +221,17 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     // 两页每 5s 自动轮换，按一下 BOOT 立刻切页。
-    // 倒计时页为实时数据：每帧从 NTP 时钟构建条目（未对时显示 `--` 占位）；
-    // 用量页仍为 demo 数据（push 模块未实现，设计文档 §15 第 6 步）。
+    // 两页都是实时数据：倒计时条目从 NTP 时钟现算（未对时显示 `--` 占位），
+    // 用量从 STATE 读（push_task 写入，从未收到时显示 `--`）。
     let mut count_down = CountDown::new();
-    let mut claude_usage = ClaudeUsage::new(USAGE);
 
     let mut screen = Screen::CountDown;
-    let mut tick: u16 = 0;
-    let mut next_tick = Instant::now() + DATA_TICK;
+    let mut next_tick = Instant::now() + REDRAW_TICK;
     let mut next_auto_switch = Instant::now() + AUTO_SWITCH;
     loop {
-        let data = match STATE.anon_receiver().try_get().and_then(|s| s.clock) {
+        // 两页共用同一次 STATE 快照
+        let state = STATE.anon_receiver().try_get();
+        let data = match state.and_then(|s| s.clock) {
             Some(clock) => {
                 let dt = clock.now_local();
                 CountDownData::Ready {
@@ -244,16 +242,20 @@ async fn main(spawner: Spawner) -> ! {
             }
             None => CountDownData::Unknown,
         };
-
-        for i in 0..GAUGE_COUNT {
-            let period = 60 / (i as u16 + 1);
-            claude_usage.set_percentage(i, (tick % period) as f32 / period as f32);
-        }
+        let usage = state
+            .map(|s| UsageData {
+                values: s.usage,
+                freshness: s.freshness(),
+            })
+            .unwrap_or(UsageData {
+                values: [0; 3],
+                freshness: Freshness::Unknown,
+            });
 
         let mut fb = lcd.frame().await;
         match screen {
             Screen::CountDown => count_down.draw(&mut *fb, &data).unwrap(),
-            Screen::ClaudeUsage => claude_usage.draw(&mut *fb).unwrap(),
+            Screen::ClaudeUsage => ClaudeUsage::draw(&mut *fb, &usage).unwrap(),
         }
         drop(fb);
 
@@ -272,8 +274,7 @@ async fn main(spawner: Spawner) -> ! {
 
         let now = Instant::now();
         if now >= next_tick {
-            tick = tick.wrapping_add(1);
-            next_tick += DATA_TICK;
+            next_tick += REDRAW_TICK;
         }
         if now >= next_auto_switch {
             screen = screen.next();

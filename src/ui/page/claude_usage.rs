@@ -1,11 +1,18 @@
-//! Claude 用量页面：3 组 {仪表盘 + 文字}，横向均分屏幕。
+//! Claude 用量页面：3 组 {仪表盘 + 标签}，横向均分屏幕。
+//!
+//! 纯渲染器（设计文档 §7.3）：数据从 [`UsageData`] 传入，页面无状态。
+//! 标签写死在固件里，不走网络（PRD §4）。
+//!
+//! - **Unknown**（从未收到推送）：仪表显示 `--`，不显示 0%——0% 会被误读成"额度没用"
+//! - **Stale**：仪表与标签用弱化配色（[`theme::TEXT_MUTED`]）
+//! - **Fresh**：正常配色
 //!
 //! ```text
 //! ┌────────────────────────────────────────────┐
 //! │    ╭───╮        ╭───╮        ╭───╮         │
-//! │    │42%│        │77%│        │13%│         │
+//! │    │42%│        │77%│        │ 13%│        │
 //! │    ╰───╯        ╰───╯        ╰───╯         │
-//! │   SESSION        WEEK         OPUS         │
+//! │   Session     Week      Fable             │
 //! └────────────────────────────────────────────┘
 //! ```
 
@@ -18,6 +25,7 @@ use embedded_graphics::{
 };
 use font_consumer::FontTextStyle;
 
+use crate::data::Freshness;
 use crate::ui::{
     component::gauge::Gauge,
     font,
@@ -27,6 +35,9 @@ use crate::ui::{
 
 /// 仪表盘组数
 pub const GAUGE_COUNT: usize = 3;
+
+/// 标签写死在固件里（PRD §4），顺序与推送包字段一致：session / week / fable
+const LABELS: [&str; GAUGE_COUNT] = ["Session", "Week", "Fable"];
 
 const GAUGE_SIZE: usize = 90;
 const GAUGE_BORDER: usize = 12;
@@ -44,48 +55,38 @@ const CELLS_LEFT: i32 = (SCREEN_WIDTH as i32 - CELL_WIDTH * GAUGE_COUNT as i32) 
 
 type UsageGauge = Gauge<GAUGE_SIZE, GAUGE_BORDER>;
 
-/// 一组用量：一个仪表盘 + 下方标签
+/// 页面数据：三个用量百分比 + 新鲜度
 #[derive(Clone, Copy)]
-pub struct UsageItem {
-    /// 标签，建议全大写、不含空格（见 [`crate::ui::page`] 的字体说明）
-    pub label: &'static str,
-    /// 用量比例，0.0..=1.0
-    pub percentage: f32,
+pub struct UsageData {
+    /// Session / Week / Fable 用量百分比 0..=100
+    pub values: [u8; GAUGE_COUNT],
+    pub freshness: Freshness,
 }
 
-impl UsageItem {
-    pub const fn new(label: &'static str, percentage: f32) -> Self {
-        Self { label, percentage }
-    }
-}
-
-pub struct ClaudeUsage {
-    labels: [&'static str; GAUGE_COUNT],
-    gauges: [UsageGauge; GAUGE_COUNT],
-}
+pub struct ClaudeUsage;
 
 impl ClaudeUsage {
-    pub fn new(items: [UsageItem; GAUGE_COUNT]) -> Self {
-        Self {
-            labels: core::array::from_fn(|i| items[i].label),
-            gauges: core::array::from_fn(|i| UsageGauge::new(gauge_origin(i), items[i].percentage)),
-        }
-    }
+    pub fn draw<D: DrawTarget<Color = Rgb565>>(
+        target: &mut D,
+        data: &UsageData,
+    ) -> Result<(), D::Error> {
+        target.fill_solid(&target.bounding_box(), theme::BACKGROUND)?;
 
-    pub fn set_percentage(&mut self, index: usize, percentage: f32) {
-        self.gauges[index].percentage(percentage);
-    }
-
-    pub fn set_label(&mut self, index: usize, label: &'static str) {
-        self.labels[index] = label;
-    }
-
-    pub fn draw<D: DrawTarget<Color = Rgb565>>(&self, target: &mut D) -> Result<(), D::Error> {
-        let area = target.bounding_box();
-        target.fill_solid(&area, theme::BACKGROUND)?;
+        // Stale 时整组弱化（PRD §4）；Unknown 保持正常配色，只是数字为 `--`
+        let muted = data.freshness == Freshness::Stale;
+        let text_color = if muted {
+            theme::TEXT_MUTED
+        } else {
+            theme::TEXT_PRIMARY
+        };
+        let fill_color = if muted {
+            theme::TEXT_MUTED
+        } else {
+            theme::ACCENT
+        };
 
         let ascii = font::ascii_18();
-        let label_style = FontTextStyle::new(&ascii, theme::TEXT_PRIMARY)
+        let label_style = FontTextStyle::new(&ascii, text_color)
             .background_color(theme::BACKGROUND)
             .char_spacing(CHAR_SPACING);
         let centered = TextStyleBuilder::new()
@@ -93,8 +94,17 @@ impl ClaudeUsage {
             .baseline(Baseline::Top)
             .build();
 
-        for (i, label) in self.labels.iter().enumerate() {
-            self.gauges[i].draw(target)?;
+        // 仪表盘是值类型，每帧按数据构造（与 count_down 的进度条同模式）
+        for (i, label) in LABELS.iter().enumerate() {
+            let mut gauge = UsageGauge::new(gauge_origin(i), 0.0)
+                .filled_part_color(fill_color)
+                .text_color(text_color);
+            match data.freshness {
+                Freshness::Unknown => gauge = gauge.display("--"),
+                _ => gauge = gauge.percentage(data.values[i] as f32 / 100.0),
+            }
+            gauge.draw(target)?;
+
             Text::with_text_style(
                 truncate_to_width(&ascii, label, CELL_WIDTH as u32),
                 Point::new(cell_center_x(i), LABEL_TOP),

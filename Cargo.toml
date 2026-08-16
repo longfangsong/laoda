@@ -27,9 +27,14 @@ embassy-net = { version = "0.9.1", features = [
   "dns",
   "log",
   "medium-ethernet",
+  "multicast",
   "tcp",
   "udp",
 ] }
+hick-embassy = "0.2"
+# hick-embassy 没再导出这两个，直接依赖（alloc feature 开启 Name/ServiceRecords/ServiceSpec）
+mdns-proto = { version = "0.3", default-features = false, features = ["alloc"] }
+rand_core = { version = "0.10", default-features = false }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
 esp-alloc = "0.10.0"

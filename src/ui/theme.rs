@@ -22,6 +22,9 @@ pub const TEXT_PRIMARY: Rgb565 = rgb565(235, 235, 235);
 /// 次要文字，比正文暗一档 (#8C8C8C)
 pub const TEXT_SECONDARY: Rgb565 = rgb565(140, 140, 140);
 
+/// 弱化文字，Stale 状态的用量仪表与标签 (#58585C)
+pub const TEXT_MUTED: Rgb565 = rgb565(88, 88, 92);
+
 /// 日历顶栏的苹果日历红 (#E06152)
 pub const CALENDAR_BAND: Rgb565 = rgb565(224, 97, 82);
 

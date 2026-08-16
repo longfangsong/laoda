@@ -23,6 +23,8 @@ pub struct Gauge<const SIZE: usize = 93, const BORDER: usize = 13> {
     empty_part_color: Rgb565,
     background_color: Rgb565,
     text_color: Rgb565,
+    /// 中心文字覆盖（如 Unknown 时的 `--`）；`None` = 照常显示百分比
+    text_override: Option<&'static str>,
 }
 
 impl<const SIZE: usize, const BORDER: usize> Gauge<SIZE, BORDER> {
@@ -34,6 +36,7 @@ impl<const SIZE: usize, const BORDER: usize> Gauge<SIZE, BORDER> {
             empty_part_color: theme::TRACK,
             background_color: theme::BACKGROUND,
             text_color: theme::TEXT_PRIMARY,
+            text_override: None,
         }
     }
 
@@ -57,8 +60,15 @@ impl<const SIZE: usize, const BORDER: usize> Gauge<SIZE, BORDER> {
         self
     }
 
-    pub fn percentage(&mut self, percentage: f32) {
+    pub fn percentage(mut self, percentage: f32) -> Self {
         self.percentage = percentage;
+        self
+    }
+
+    /// 用固定文字（如 `--`）代替中心百分比数字
+    pub fn display(mut self, text: &'static str) -> Self {
+        self.text_override = Some(text);
+        self
     }
 
     pub fn draw<D: DrawTarget<Color = Rgb565>>(&self, target: &mut D) -> Result<(), D::Error> {
@@ -97,11 +107,16 @@ impl<const SIZE: usize, const BORDER: usize> Gauge<SIZE, BORDER> {
             .baseline(Baseline::Middle)
             .build();
 
-        let pct = (percentage * 100.0 + 0.5) as u8;
+        // 覆盖文字（如 `--`）或百分比数字，两者共用同一条绘制路径
         let mut buf = [0u8; 4];
-        let nlen = crate::util::format_u8(&mut buf, pct);
-        buf[nlen] = b'%';
-        let text = core::str::from_utf8(&buf[..nlen + 1]).unwrap();
+        let text = if let Some(override_) = self.text_override {
+            override_
+        } else {
+            let pct = (percentage * 100.0 + 0.5) as u8;
+            let nlen = crate::util::format_u8(&mut buf, pct);
+            buf[nlen] = b'%';
+            core::str::from_utf8(&buf[..nlen + 1]).unwrap()
+        };
         Text::with_text_style(
             text,
             circle_center + Point::new(0, TEXT_Y_NUDGE),

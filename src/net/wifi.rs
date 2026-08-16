@@ -39,8 +39,10 @@ pub async fn wifi_task(mut controller: WifiController<'static>) -> ! {
             Timer::after(Duration::from_secs(60)).await;
         }
     }
-    // DTIM modem sleep，与 UDP 收发兼容（设计文档 §11）
-    if let Err(e) = controller.set_power_saving(PowerSaveMode::Maximum) {
+    // 关闭省电：Maximum/Minimum 下设备长时间睡在 DTIM 之间，AP 把发给
+    // 设备的单播帧缓存到设备下次醒来才释放——实测推送延迟数分钟才到达、
+    // ack 大量丢失。本机 USB 常电，省电无意义，保持常醒。
+    if let Err(e) = controller.set_power_saving(PowerSaveMode::None) {
         warn!("wifi 省电模式设置失败: {e:?}");
     }
 

@@ -147,7 +147,7 @@ NTP 尚未同步成功时，日历显示 `--`，四条条目全部显示为 `--`
 │ cron 每 5 min             │
 │  claude -p "/usage"       │
 │  → 解析 → 3 个 u8         │
-│  → UDP 广播               │
+│  → UDP laoda.local        │
 └───────────┬───────────────┘
             │ UDP :5005（局域网明文 + token）
             ▼
@@ -395,11 +395,24 @@ ClaudeUsage::draw(&mut *fb, &UsageData { values, freshness })?;
 
 ## 8. 推送协议
 
-**传输：UDP 广播。** 工作机 `sendto('255.255.255.255', 5005)`，设备 bind 5005 被动接收。选它的理由：
+**传输：mDNS 名字 + UDP 单播。** 固件跑 mDNS 应答器（`src/net/mdns.rs`，
+hick-embassy），广播 `laoda.local` 主机名与 `_laoda-push._tcp` :5005 服务；
+工作机默认 `sendto('laoda.local', 5005)`，设备 bind 5005 被动接收。选它的理由：
 
-- 设备走 DHCP，IP 会变；广播免去 mDNS / 静态绑定 / 服务发现的全部复杂度
+- 设备走 DHCP，IP 会变且脚本无法事先知道；mDNS 让同网段任何客户端现查
+  当前租约地址，免手工管 IP
+- A 记录取自 DHCP 租约：embassy-net 0.9.1 把租约也存进 `static_v4`，
+  `Stack::config_v4()` 能读出来（API 文档没写 DHCP 路径，读源码确认）
 - 单包无连接，没有 HTTP header 要解析，socket buffer 512 字节足够
 - 5 分钟一次的数据，丢包无所谓，下次自然补上
+
+**已知限制**：
+
+- hick 引擎没有"更新记录"API（只有 register/unregister），DHCP 换租约后
+  mDNS 会继续广播旧地址直到重启（家庭网络很少发生，可接受）
+- 部分公共网络封 mDNS/组播或客户端定向广播（2026-08 实测：关闭组播转发的
+  路由器不转发 `255.255.255.255`）。退路：`LAODA_PUSH_ADDR=<设备IP>` 手动
+  指定，协议不变。设备 IP 可从串口日志 ack 行的 local_address 读
 
 **载荷：定长文本行**（三个数字，用 JSON 不划算）：
 
@@ -472,7 +485,7 @@ match select4(
 | `refresh_task` | 每 16ms 醒来查 `DIRTY` | 改为 `Signal` 驱动，`signal.wait().await`。没有绘制就不醒，CPU 可长时间睡眠 |
 | 渲染循环 | 每秒无条件重绘全屏 | 事件驱动（见 §10）。稳态下最快也就每分钟一次 |
 | WS2812 | 每 50ms 推进彩虹 | 改为状态指示灯，仅状态变化时更新，亮度降到 ~1/8 |
-| WiFi | 未启用 | `PowerSaveMode::Maximum`。UDP 监听与 DTIM modem sleep 完全兼容，AP 会缓存待发包 |
+| WiFi 省电 | 未启用 | `PowerSaveMode::None`。实测 Maximum 下 AP 把发给设备的单播帧缓存到设备下次 DTIM 唤醒才释放，推送延迟数分钟、ack 大量丢失；本机 USB 常电，保持常醒 |
 | CPU 主频 | 160MHz | 可降到 80MHz，收益有限，放到最后评估 |
 
 关于 `refresh_task`：现有实现用 `Timer::after` 而非 `Ticker`，注释里解释了这是为了避免饿死绘制方。改成 Signal 驱动后这个问题自动消失 —— 无数据不唤醒，有数据时锁竞争天然公平。
@@ -523,7 +536,7 @@ println!("cargo:rerun-if-changed=.env");
 | 项 | 影响 | 应对 |
 |---|---|---|
 | `claude -p "/usage"` 在非交互模式下可能不输出可解析文本 | 阻塞工作机侧实现 | **动手前先手动跑一次确认**。备选：`npx ccusage`、直接解析 `~/.claude/projects/**/*.jsonl`。无论哪种，推给设备的都是同样三个数字，不影响固件设计 |
-| 路由器过滤广播 | 推送收不到 | 改 DHCP 绑定 + 单播，协议不变 |
+| mDNS/组播被网络封锁 | `laoda.local` 解析不到 | `LAODA_PUSH_ADDR=<设备IP>` 手动指定，协议不变 |
 | `time` crate 体积 | flash 紧张 | 引入前后跑 `cargo bloat` 对比；超预算则退回手写 Hinnant，改动局限在 `countdown.rs` |
 | framebuffer 110KB + DMA 16KB + heap 64KB 已占大头 | 网络栈 OOM | 不上 TLS，socket buffer 保持在 512B–1KB 量级 |
 | 不处理法定节假日 | 春节期间 `Week` / `Day` 仍会显示 | 已列为非目标。将来若要做，最简方案是让工作机在推送包里带一个"今天是否工作日"的标志位 |
@@ -564,9 +577,14 @@ println!("cargo:rerun-if-changed=.env");
     （kiss-o'-death）或干脆不理，池内服务器也普遍过滤临时端口。
   - **stratum 是第 2 字节的完整 8 位**（不是高 2 位）：按 `byte >> 6` 解析会把所有合法响应
     （stratum 1–3）误判为 0 而全部丢弃。
-- **`src/net/stack.rs`**：`embassy_net::new` + `StackResources<3>`（DHCP、DNS 查询、NTP socket 各占一槽），
+- **`src/net/stack.rs`**：`embassy_net::new` + `StackResources<5>`（DHCP、DNS 查询、NTP、push、mDNS 各占一槽；加任务时忘了腾槽会 panic `adding a socket to a full SocketSet`），
   随机种子固定 `0x51a0_da0d`。`Runner` 由 `net_task` 单独承载（`run()` 返回 `!`）。
-  `embassy-net` 需要 `dns` feature（默认关闭）。
+  `embassy-net` 需要 `dns` + `multicast` feature（默认均关闭）。
+- **`src/net/mdns.rs`**（mDNS 应答，§8）：hick-embassy 0.2（与 embassy-net 0.9 / smoltcp 0.13 配套），
+  注册 `laoda.local` + `_laoda-push._tcp` :5005，A 记录取 `config_v4()` 的 DHCP 租约地址；
+  `wait_config_up` 后建 socket、bind :5353、join 224.0.0.251 再进 `MdnsState::run`（永不返回）。
+  随机数用 30 行 SplitMix64 实现 `rand_core::TryRng`（0.10 对 `Error=Infallible` 有 blanket impl，
+  只实现 TryRng 即满足 `Rng`）。1500 字节缓冲用 `StaticCell<MaybeUninit<..>>` 避免大栈帧。
 - **渲染侧钩子**：同步成功后 `count_down` 页的日历/星期切到真实日期（`STATE.clock` 有值即真值），
   未同步时维持 2026-07-08 demo 日期。这是上屏验证 SNTP 是否成功的直接手段。
 - **CI**：`.env` 缺任何 `LAODA_*` 键时 build.rs 注入空占位，编译与 CI 均不依赖真实凭据；
@@ -577,10 +595,43 @@ println!("cargo:rerun-if-changed=.env");
 - **`src/data/countdown.rs`**：条目模型（`Unit`/`CountDownItem`，从 `ui/page` 移到数据层，UI 只渲染）
   与全部剩余量纯函数。只依赖 `time`，host 侧单测在 **`host-tests/`**（独立 crate，
   `#[path]` 原样引入被测模块；仓库根 `[build] target` 写死 riscv，所以必须显式
-  `cargo test --target <本机架构>`，CI 里写死 `x86_64-unknown-linux-gnu`）。
+  `host-tests/.cargo/config.toml` 覆盖父目录 riscv 目标，直接 `cargo test` 即可）。
   一个设计确认：Year 显示今年剩余**工作时间**（工作日 08:00–18:00 秒数之和），元旦零点切换到新年全年工作总量（切换点不会为 0）；12 月 31 日 18:00 后为 0H。
 - **`ui/page/count_down.rs`**：改为无状态纯渲染器 `draw(&mut fb, &CountDownData)`；
   可见行整体垂直居中（`rows_top(n)`）；进度条每帧按行位置构造。
   未对时（PRD §3.5）：日历与四行全部 `--` 占位（`Calendar::set_date(0, _)`）。
 - **`main.rs`**：demo 日期/条目推进逻辑全部删除，每帧从 `STATE.clock` 现算条目。
   用量页仍是 demo 数据（第 6 步 push 落地后替换）。
+
+第 6、7 步已实现（推送接收 + 新鲜度/降级表现）：
+
+- **`src/net/push.rs`**：`push_task` 监听 UDP :5005，`recv_from` 收包、
+  [`parse_usage_push`]（纯函数，落在 `src/util.rs`，无 embassy 依赖）解析校验、
+  写 `STATE.usage` / `usage_at`、向来源地址单播 `ok\n` 回执。
+  token 取自 `option_env!("LAODA_PUSH_TOKEN")`，**为空时静默丢弃所有推送**（只打一次 error）。
+  冗余时间源按 §4：仅 `clock == None` 时采用包内 epoch。
+- **`claude_usage.rs`**：改为纯渲染器 `ClaudeUsage::draw(&fb, &UsageData { values, freshness })`，
+  标签 `Session`/`Week`/`Fable` 写死在页面（不走网络）；仪表盘每帧按数据构造。
+  Unknown → 仪表中心 `--`（`Gauge::display` 覆盖文字，不画 0%）；Stale → 填充/数字/标签
+  全部用新增的 `theme::TEXT_MUTED`（#58585C）。
+- **`main.rs`**：1s 重绘心跳保留（`Day` 以秒计），demo 数据全部删除；
+  两页共用同一次 `STATE` 快照。事件驱动的显示边界属第 8 步。
+- **工作机侧 `scripts/push_usage.py`**（stdlib only）：跑 `claude -p "/usage"`，
+  解析后按 §8 协议发 `laoda.local:5005`（`LAODA_PUSH_ADDR` 可覆盖），等 5s ack，
+  退出码 0/1 供 cron 记录；名字解析失败（gaierror）单独提示 mDNS 未生效。
+  **风险 #1 已消除**：实测 `claude -p "/usage"`（2.1.233）输出三行可正则提取——
+  `Current session: N% used`、`Current week (all models): N% used`、`Current week (Fable): N% used`；
+  输出格式随版本变化是唯一脆弱点，脚本解析失败时打印全文并退出 1。
+- host 侧单测新增 `parse_usage_push` 两例（合法/边界 + 8 种拒绝路径）。
+
+真机实测（2026-08，Bahnhof_7EAB14 家用路由器，设备 DHCP 地址 192.168.1.232）：
+
+- 早期测量时路由器**组播转发未开**：客户端发起的 `255.255.255.255` 定向广播
+  不转发；设备→工作机 ack 单播大部分被丢（6 次中 1 次成功），工作机→设备
+  单播稳定可达。ack 丢失原因待 mDNS 版本上电后复测确认（怀疑与组播转发/
+  电源管理配置相关，非固件问题——设备日志确认 ack 已发送）。
+- 路由器已开启组播转发 + 固件加 mDNS 后，预期 `laoda.local` 解析、推送、
+  ack 全链路正常（待复测记录）。
+- 设备 IP 的获取途径：macOS 上 `ping laoda.local` / `dns-sd -G ADDR laoda.local`；
+  或串口日志 `ack 已发送 → ... local_address: Some(...)` 行；ack 能通时脚本
+  成功行直接打印 `设备=<ip>`。

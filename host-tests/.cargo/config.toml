@@ -1,0 +1,4 @@
+# 覆盖父目录 .cargo/config.toml 的 riscv 目标：host 测试在本机 CPU 上跑
+# （换机器时改成 `rustc -vV` 里的 host triple）
+[build]
+target = "aarch64-apple-darwin"

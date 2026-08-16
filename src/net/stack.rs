@@ -1,10 +1,14 @@
 //! embassy-net 协议栈初始化与 runner 任务（设计文档 §10 `net_task`）。
+//!
+//! IPv4 走 DHCP。租到的地址可从 `Stack::config_v4()` 读到（0.9.1 把 DHCP
+//! 租约也存进 `static_v4`），mDNS 任务（§8）靠它填 A 记录，所以工作站
+//! 无需知道设备 IP，直接推 `laoda.local`。
 
 use esp_radio::wifi::Interface;
 use static_cell::StaticCell;
 
-/// socket 槽位：DHCP 1 + DNS 1 + SNTP 1。push 模块落地时再加 1。
-const SOCK: usize = 3;
+/// socket 槽位：DHCP 1 + DNS 1 + SNTP 1 + push 1 + mDNS 1。
+const SOCK: usize = 5;
 
 static RESOURCES: StaticCell<embassy_net::StackResources<SOCK>> = StaticCell::new();
 
@@ -18,12 +22,11 @@ pub fn new(
     embassy_net::Stack<'static>,
     embassy_net::Runner<'static, Interface<'static>>,
 ) {
-    let config = embassy_net::Config::dhcpv4(Default::default());
     let resources = RESOURCES.init(embassy_net::StackResources::new());
-    embassy_net::new(driver, config, resources, RANDOM_SEED)
+    embassy_net::new(driver, embassy_net::Config::dhcpv4(Default::default()), resources, RANDOM_SEED)
 }
 
-/// 协议栈 runner，永不退出。断线重连后 DHCP 由 embassy-net 自动重新发起。
+/// 协议栈 runner，永不退出。DHCP 在 runner 内处理，断线重连无需额外处理。
 #[embassy_executor::task]
 pub async fn net_task(mut runner: embassy_net::Runner<'static, Interface<'static>>) -> ! {
     runner.run().await

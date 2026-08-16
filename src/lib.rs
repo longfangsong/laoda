@@ -1,4 +1,5 @@
 #![no_std]
+extern crate alloc;
 
 /// Abstract drivers to external devices
 /// Chip/bus/wire level, not whole device level
