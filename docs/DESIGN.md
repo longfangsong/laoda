@@ -635,3 +635,96 @@ println!("cargo:rerun-if-changed=.env");
 - 设备 IP 的获取途径：macOS 上 `ping laoda.local` / `dns-sd -G ADDR laoda.local`；
   或串口日志 `ack 已发送 → ... local_address: Some(...)` 行；ack 能通时脚本
   成功行直接打印 `设备=<ip>`。
+
+## 17. 实施注记（TF 卡文件 IO，2026-08）
+
+板上 TF 卡槽接在 SPI2 上：**CS=GPIO4、MISO=GPIO5**，MOSI=GPIO6 / SCLK=GPIO7 与 LCD 共用
+（Waveshare ESP32-C6-LCD-1.47 wiki）。分三层落地：
+
+```
+src/driver/sdcard.rs        SPI 模式 SD 卡块驱动（512B 一块，async）
+src/driver/sdcard/proto.rs  命令帧 / CRC7 / CRC16 / CSD 解析（纯逻辑，host 可测）
+src/device/tf.rs            挂 FAT，提供文件级 API（Tf）
+```
+
+### 为什么块驱动自己写、FAT 用现成的
+
+块驱动这层是**板级**的：要和 LCD 抢同一条总线、要换速率、CS 要跨多次传输保持拉低，
+现成 crate（`sdspi`）走的是 `SpiDevice` 抽象，每个方法结束都会抬 CS，和 SD 规范对不上；
+自己写反而更短更可控（约 500 行，含注释）。
+
+FAT 这层是**协议**的，读写完整实现（簇分配、FAT 链、目录项、长文件名）上千行且容易写错，
+用 `embedded-fatfs`（MabezDev）。它和 `block-device-driver` / `block-device-adapters` /
+`embedded-partitions` 同仓库，全部从同一个 commit 取 git 依赖并锁 rev：`embedded-fatfs`
+在 crates.io 上只有 0.0.0 占位版，而 `block-device-*` 的已发布版还停在 embedded-io-async 0.6，
+跟 0.7 的 `embedded-fatfs` 拼不起来。feature 取 `alloc + lfn + log`，关掉默认的
+`chrono`（要 std 时钟）和 `unicode`（只影响非 ASCII 文件名的大小写折叠）。
+
+### 共用总线的两个约束
+
+1. **CS 跨事务**。一条 SD 命令是「命令帧 → 轮询 R1 → 数据块 → 等忙」，中间要看卡的回应
+   决定下一步，塞不进 `SpiDevice::transaction` 的静态 operation 列表。所以 `SdCard` 直接
+   持 `Mutex<NoopRawMutex, SpiDmaBus>` 和自己的 CS，`Session::begin/end` 界定一次事务。
+2. **速率不同**。卡初始化必须 ≤400kHz、之后走 20MHz（SPI 模式上限 25MHz），LCD 是 80MHz。
+   两边都改成「每次事务自己设频率」：LCD 的 `LcdSpi` 从 `SpiDevice` 换成
+   `SpiDeviceWithConfig`（80MHz），SD 侧在 `Session::begin` 里设。谁也不用管上一个用户留下什么。
+
+代价：一次 SD 事务会把总线独占到结束，写入时卡内部擦除可能占上百毫秒，这段时间 LCD 刷新
+被挡住。所以**文件操作不要放进渲染循环**，`Tf` 也不是 `Sync`，多任务用要自己包 mutex。
+
+### 其它落地细节
+
+- **DMA rx 缓冲 64 → 512 字节**。`SpiDmaBus::transfer_in_place_async` 按 tx 缓冲切块、
+  把整块长度交给 rx 通道，rx 比一次收发的长度小会直接报 DMA 长度错；SD 一次收发一整块。
+  驱动内所有全双工传输都 ≤512 字节，这是个成对的约束。
+- **CRC 默认打开**（CMD59）。SPI 模式默认不校验，打开后每块多算一次 CRC16（~25µs，
+  相对 512B@20MHz 的 205µs 约 +12%），换来坏数据不会被当好数据用。卡拒绝 CMD59 就退回不校验，
+  只打一条 warn。读到 CRC 不符会自动重发一次（同一条总线上 LCD 在跑 80MHz，偶发干扰不算意外）。
+- **容量从 CSD 现算**，v1/v2 两种布局都支持（`proto::csd_block_count`）。
+- **文件时间戳来自 NTP 时钟**（`ClockTimeProvider` 读 `STATE.clock`）。没对上时用 FAT 纪元
+  1980-01-01，一眼能看出「这个时间戳不作数」，而不是编一个假的当前时间。
+- **分区布局自动识别**：常见 SD 卡是 MBR + 一个 FAT 分区，也支持整卡格式化成 FAT（superfloppy）。
+- **写入后一定 flush**（目录项 + FAT + FSInfo 都落盘），掉电最多丢正在写的那一次调用。
+  代价是每次写多几个块的读改写，别拿它当高频日志用。
+- **没插卡不影响开机**：`tf::mount_optional` 把失败降级成日志。板上没有卡检测引脚，
+  「初始化一直超时」就是最接近「卡槽为空」的信号。
+- **内存**（debug 构建实测）：`.bss` 189328 → 193640（+4.3KB，主要是 main 的 future 里
+  多了挂载路径），`.stack` 187456 → 182864（两者共享同一段，此消彼长）。
+  一次文件写的 future 约 11KB 栈，在 178KB 栈上没问题，但别塞进 arena 很小的任务。
+- **host 侧单测**：`proto` 的 CRC 与 CSD 解析共 5 例（含规范里 CMD0=0x95 / CMD8=0x87 两个
+  标准帧、真实 SDHC 的 CSD、手工编码的 v1 CSD）。
+
+### 真机实测（2026-08-16）
+
+16GB 卡，MBR + 单个 FAT32 分区（起始 LBA 32，30535424 扇区，簇 8KB）：
+
+```
+TF 卡就绪：14910 MiB，按块寻址，CRC 校验开
+TF 卡分区 0：Fat32Lba，起始 LBA 32，30535424 个扇区
+TF 卡已挂载：Fat32，簇 8192 字节
+TF 卡 boot.log：第 3 次开机
+读 boot.log（前 15 字节）："boot\nboot\nboot\n"
+写读回一致：laoda_selftest.txt = "laoda selftest, uptime 913 ms"
+```
+
+列目录、读文件、建文件+写+读回、追加、剩余空间全部通过；`boot.log` 的计数随每次开机递增，
+说明追加与目录项更新都真的落盘了。
+
+### 踩坑：**第一张卡根本不支持 SPI 模式**
+
+调了很久才定位。症状：CMD0 永远拿不到 R1，MISO 上是 `0F/1E/3C/78/F0/E1/C3/87`
+——全都是 `11110000` 的循环移位，即一个跟 SCLK 严格同步、每字节一个周期的方波，
+而且这个状态会一直保持到给卡断电（软复位清不掉）。
+
+排除过程（这些手法下次还能用）：
+
+- 把 MISO 临时接到未接线的 GPIO23 → 读到全 `00`，证明 esp-hal 的读通路没问题，
+  波形真实存在于 GPIO5 上。
+- 同一条线分别走阻塞和异步 DMA 读 → 结果完全一致，排除 esp-hal 异步路径。
+- 量 1024 个空时钟的耗时（3.8ms）→ 确认 `apply_config` 真把频率降到了 400kHz。
+- `Flex` 把 CS/MISO 切成纯输入采样：GPIO4 浮空稳定读高 = 卡的 50kΩ 内部上拉在，线是通的；
+  GPIO5 空闲时 4000 次采样零跳变 = 没有别的信号源挂在上面。
+- mode0/mode3 × 400k/100k 四种组合全试过，一次都没拿到合法 R1。
+
+结论：SPI 模式在 SD 规范 7.0 之后是**可选**的，不少新的大容量卡干脆没实现。
+换一张卡即刻正常。所以 `tf::mount_optional` 在超时路径上把这一条也写进了日志。

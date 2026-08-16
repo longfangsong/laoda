@@ -1,7 +1,7 @@
 use core::convert::Infallible;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice as SharedSpiDevice;
+use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::mutex::{Mutex, MutexGuard};
@@ -27,8 +27,11 @@ const Y_OFFSET: u16 = 34;
 const FRAMEBUFFER_SIZE: usize = WIDTH as usize * HEIGHT as usize * 2;
 const REFRESH_INTERVAL_MS: u64 = 16;
 
+/// LCD 侧的总线句柄。用 `SpiDeviceWithConfig` 而不是 `SpiDevice`：TF 卡和 LCD
+/// 共用 SPI2，但两者速率差着一个数量级（卡 ≤20MHz、屏 80MHz），所以每次事务
+/// 各自重设一次频率，谁也不用管上一个用的是什么。
 pub type LcdSpi =
-    SharedSpiDevice<'static, NoopRawMutex, SpiDmaBus<'static, Async>, Output<'static>>;
+    SpiDeviceWithConfig<'static, NoopRawMutex, SpiDmaBus<'static, Async>, Output<'static>>;
 
 static FRAMEBUFFER: Mutex<CriticalSectionRawMutex, FrameBuffer> =
     Mutex::new(FrameBuffer([0; FRAMEBUFFER_SIZE]));

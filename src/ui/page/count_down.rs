@@ -57,15 +57,20 @@ const COLUMN_RIGHT: i32 = COLUMN_LEFT + COLUMN_WIDTH as i32;
 /// 标签与行尾数值之间的最小间距；标签截断宽度按该行数值实测宽度推导
 const LABEL_TO_DAYS: u32 = 6;
 
-const LABEL_HEIGHT: i32 = 18;
 const LABEL_TO_BAR: i32 = 2;
 const BAR_HEIGHT: usize = 12;
-/// 单行高度（文字 + 间隙 + 进度条 + 行距）
-const ROW_HEIGHT: i32 = LABEL_HEIGHT + LABEL_TO_BAR + BAR_HEIGHT as i32 + 6;
+/// 行距
+const ROW_GAP: i32 = 6;
+
+/// 单行高度（文字 + 间隙 + 进度条 + 行距）。
+/// 文字高度取字体 glyph box 的实际高度，换字体时排版自动跟着走。
+const fn row_height(label_height: i32) -> i32 {
+    label_height + LABEL_TO_BAR + BAR_HEIGHT as i32 + ROW_GAP
+}
 
 /// 可见行整体垂直居中（设计文档 §7.2）
-const fn rows_top(n: usize) -> i32 {
-    (SCREEN_HEIGHT as i32 - ROW_HEIGHT * n as i32 + 6) / 2
+const fn rows_top(n: usize, row_height: i32) -> i32 {
+    (SCREEN_HEIGHT as i32 - row_height * n as i32 + ROW_GAP) / 2
 }
 
 type Bar = ProgressBar<COLUMN_WIDTH, BAR_HEIGHT>;
@@ -101,9 +106,11 @@ impl CountDown {
             // Year 与 SW Release 始终可见，Ready 模式 n_rows >= 2
             Some(items) => items.iter().filter(|it| it.visible()).count(),
         };
-        let top = rows_top(n_rows);
-
         let ascii = font::ascii_18();
+        let label_height = ascii.header.height as i32;
+        let row_height = row_height(label_height);
+        let top = rows_top(n_rows, row_height);
+
         let label_style = FontTextStyle::new(&ascii, theme::TEXT_PRIMARY)
             .background_color(theme::BACKGROUND)
             .char_spacing(CHAR_SPACING);
@@ -140,7 +147,7 @@ impl CountDown {
                     )
                 }
             };
-            let y = top + ROW_HEIGHT * row;
+            let y = top + row_height * row;
             row += 1;
 
             // 数值右对齐；标签截断上限按本行数值实测宽度推导，两者不撞
@@ -164,7 +171,7 @@ impl CountDown {
             .draw(target)?;
 
             Bar::new(
-                Point::new(COLUMN_LEFT, y + LABEL_HEIGHT + LABEL_TO_BAR),
+                Point::new(COLUMN_LEFT, y + label_height + LABEL_TO_BAR),
                 elapsed,
             )
             .draw(target)?;

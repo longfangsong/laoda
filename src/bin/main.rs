@@ -7,7 +7,7 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice as SharedSpiDevice;
+use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -31,6 +31,7 @@ use laoda::data::Freshness;
 use laoda::data::STATE;
 use laoda::data::countdown::build_items;
 use laoda::device::lcd::Lcd;
+use laoda::device::tf;
 use laoda::driver::ws2812::Ws2812;
 use laoda::net;
 use laoda::ui::page::claude_usage::{ClaudeUsage, UsageData};
@@ -117,25 +118,19 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    // The following pins are used to bootstrap the chip. They are available
-    // for use, but check the datasheet of the module for more information on them.
-    // - GPIO4
-    // - GPIO5
-    // - GPIO8
-    // - GPIO9
-    // - GPIO15
-    // These GPIO pins are in use by some feature of the module and should not be used.
-    let _ = peripherals.GPIO24;
-    let _ = peripherals.GPIO25;
-    let _ = peripherals.GPIO26;
-    let _ = peripherals.GPIO27;
-    let _ = peripherals.GPIO28;
-    let _ = peripherals.GPIO29;
-    let _ = peripherals.GPIO30;
-
-    // 96KB：WiFi 运行期分配 ~60KB 峰值，mDNS（hick 引擎）另需几 KB。
-    // 从 RECLAIMED（bootloader 腾出的 64KB）挪进主 DRAM 并扩大。
-    esp_alloc::heap_allocator!(size: 98304);
+    // 96KB，拆成两个区（esp-alloc 最多 3 个，跨区分配自动回退，等效单块 96KB）：
+    // 64KB 放 RECLAIMED（bootloader 腾出的 dram2_seg，否则整段空转），
+    // 余下 32KB 才占主 DRAM——主 DRAM 的 .bss 因此少 64KB，全转成栈余量。
+    // 编译期实测：.bss 254856 → 189328，.stack 121928 → 187456。
+    //
+    // 尺寸别再往下砍。真机 70 分钟持续负载 soak（每 30s 一条用量推送，
+    // 109/109 acked）实测：峰值 81900/98304，稳态 ~74.5KB（会回落，不是泄漏）。
+    // esp-alloc 先填 region0，region0 满了才溢出到 region1，所以峰值时
+    // region1 要吃 81900-65536 ≈ 16.4KB——把下面这 32768 砍到 16384 会当场
+    // 分配失败。当前余量 16.4KB（16.7%），留给碎片和罕见事件（重连风暴、
+    // DHCP 续租）刚好。堆用量见 crate::heap 的周期上报。
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 65536);
+    esp_alloc::heap_allocator!(size: 32768);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -154,6 +149,9 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(net::push::push_task(net_stack).unwrap());
     spawner.spawn(net::mdns::mdns_task(net_stack).unwrap());
 
+    // 堆用量周期上报（峰值），压缩上面两个 heap_allocator 尺寸的依据
+    spawner.spawn(laoda::heap::heap_report_task().unwrap());
+
     // 串口调试接口（仅 debug 构建）：走 Type-C 原生 USB（USB-Serial-JTAG，
     // 与日志同一端口），`time <unix-秒>` 覆盖 NTP 时间，见 laoda::debug
     #[cfg(debug_assertions)]
@@ -165,27 +163,44 @@ async fn main(spawner: Spawner) -> ! {
     let ws2812 = Ws2812::new(peripherals.RMT, peripherals.GPIO8);
     spawner.spawn(rainbow_task(ws2812).unwrap());
 
-    // LCD（Waveshare ESP32-C6-LCD-1.47）：MOSI=GPIO6, SCLK=GPIO7,
-    // CS=GPIO14, DC=GPIO15, RST=GPIO21, 背光=GPIO22。
-    // SPI 总线用共享 mutex，板上 TF 卡槽与 LCD 共用这条总线。
-    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) = dma_buffers!(64, 16384);
+    // SPI2（Waveshare ESP32-C6-LCD-1.47）：MOSI=GPIO6, SCLK=GPIO7 由 LCD 和
+    // TF 卡槽共用；LCD 独占 CS=GPIO14, DC=GPIO15, RST=GPIO21, 背光=GPIO22，
+    // TF 卡独占 MISO=GPIO5, CS=GPIO4。
+    //
+    // rx 缓冲 512 字节：TF 卡一次收发一整块（512B），而 `SpiDmaBus` 的
+    // `transfer_in_place_async` 是按 tx 缓冲切块、把整块长度交给 rx 通道的，
+    // rx 比一块小就会报 DMA 长度错。LCD 只写不读，不受影响。
+    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) = dma_buffers!(512, 16384);
     let dma_rx_buf = DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();
     let dma_tx_buf = DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();
-    let spi = Spi::new(
-        peripherals.SPI2,
-        SpiConfig::default()
-            .with_frequency(Rate::from_mhz(80))
-            .with_mode(Mode::_0),
-    )
-    .unwrap()
-    .with_sck(peripherals.GPIO7)
-    .with_mosi(peripherals.GPIO6)
-    .with_dma(peripherals.DMA_CH0)
-    .with_buffers(dma_rx_buf, dma_tx_buf)
-    .into_async();
+    // 总线上的频率由每个设备在自己的事务里设（见 device::lcd::LcdSpi），
+    // 这里给的只是初值。
+    let lcd_spi_config = SpiConfig::default()
+        .with_frequency(Rate::from_mhz(80))
+        .with_mode(Mode::_0);
+    let spi = Spi::new(peripherals.SPI2, lcd_spi_config)
+        .unwrap()
+        .with_sck(peripherals.GPIO7)
+        .with_mosi(peripherals.GPIO6)
+        .with_miso(peripherals.GPIO5)
+        .with_dma(peripherals.DMA_CH0)
+        .with_buffers(dma_rx_buf, dma_tx_buf)
+        .into_async();
     let spi_bus = SPI_BUS.init(Mutex::new(spi));
+
+    // 共用总线上不能有第二个设备被选中：先把 LCD 的片选拉到无效电平（高），
+    // 再跟 TF 卡说话。这个 Output 会一直活到下面交给 LCD 的 SpiDeviceWithConfig。
     let lcd_cs = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
-    let lcd_spi = SharedSpiDevice::new(spi_bus, lcd_cs);
+
+    // TF 卡是可选外设：挂上了就记一行开机日志，没插卡/没格式化只打日志不影响其它功能。
+    // 放在 LCD 之前：卡的初始化要在 400kHz 上握手，此时总线还没被刷屏任务占着。
+    let tf_cs = Output::new(peripherals.GPIO4, Level::High, OutputConfig::default());
+    let tf = tf::mount_optional(spi_bus, tf_cs).await;
+    if let Some(tf) = &tf {
+        tf.write_boot_record().await;
+    }
+
+    let lcd_spi = SpiDeviceWithConfig::new(spi_bus, lcd_cs, lcd_spi_config);
     let lcd_dc = Output::new(peripherals.GPIO15, Level::Low, OutputConfig::default());
     let lcd_rst = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
 
@@ -281,6 +296,4 @@ async fn main(spawner: Spawner) -> ! {
             next_auto_switch = now + AUTO_SWITCH;
         }
     }
-
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
 }

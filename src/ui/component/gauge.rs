@@ -11,11 +11,6 @@ use font_consumer::FontTextStyle;
 
 use crate::ui::{font, theme};
 
-// 字体格式暂无 baseline 元数据，Baseline::Middle 按 glyph 全高居中，
-// 而 ASCII_18 的数字/百分号墨迹只占 0..=14 / 18 行，视觉重心偏上 2px，手动补偿。
-// 待 font-maker 格式 v2 加入 baseline 后移除（见其 docs/backlog.md）。
-const TEXT_Y_NUDGE: i32 = 2;
-
 pub struct Gauge<const SIZE: usize = 93, const BORDER: usize = 13> {
     top_left: Point,
     percentage: f32,
@@ -117,13 +112,7 @@ impl<const SIZE: usize, const BORDER: usize> Gauge<SIZE, BORDER> {
             buf[nlen] = b'%';
             core::str::from_utf8(&buf[..nlen + 1]).unwrap()
         };
-        Text::with_text_style(
-            text,
-            circle_center + Point::new(0, TEXT_Y_NUDGE),
-            char_style,
-            text_style,
-        )
-        .draw(target)?;
+        Text::with_text_style(text, circle_center, char_style, text_style).draw(target)?;
 
         Ok(())
     }

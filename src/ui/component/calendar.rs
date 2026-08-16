@@ -16,13 +16,6 @@ const HEIGHT: u32 = 103;
 const RADIUS: usize = 16;
 const BAND_HEIGHT: u16 = 32;
 
-// 字体格式暂无 baseline 元数据，Baseline::Middle 按 glyph 全高居中会把
-// 文字顶高（descender 留白在下方）。按实测墨迹范围手动下移补偿：
-// ASCII_18 大写墨迹 0..=15 / 18 行 → +1px；DIGIT_48 数字墨迹 0..=36 / 48 行 → +5.5px。
-// 待 font-maker 格式 v2 加入 baseline 后移除（见其 docs/backlog.md）。
-const MONTH_Y_NUDGE: i32 = 1;
-const DAY_Y_NUDGE: i32 = 5;
-
 const MONTH_NAMES: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
@@ -74,13 +67,9 @@ impl Calendar {
         let ascii_font = font::ascii_18();
         let month_style =
             FontTextStyle::new(&ascii_font, self.month_color).background_color(self.band_color);
-        let month_center =
-            self.top_left + Point::new(WIDTH as i32 / 2, BAND_HEIGHT as i32 / 2 + MONTH_Y_NUDGE);
-        let day_center = self.top_left
-            + Point::new(
-                WIDTH as i32 / 2,
-                (BAND_HEIGHT as i32 + HEIGHT as i32) / 2 + DAY_Y_NUDGE,
-            );
+        let month_center = self.top_left + Point::new(WIDTH as i32 / 2, BAND_HEIGHT as i32 / 2);
+        let day_center =
+            self.top_left + Point::new(WIDTH as i32 / 2, (BAND_HEIGHT as i32 + HEIGHT as i32) / 2);
 
         // 尚未对时：色带与主体都画 `--`（ASCII_18 有连字符字形，digit_48 没有）
         if self.month == 0 || self.day == 0 {

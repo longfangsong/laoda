@@ -16,6 +16,9 @@ pub mod data;
 #[cfg(debug_assertions)]
 pub mod debug;
 
+/// 堆用量观测（周期打印峰值，供压缩堆尺寸做依据）
+pub mod heap;
+
 /// 网络层：WiFi、协议栈、SNTP
 pub mod net;
 

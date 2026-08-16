@@ -8,6 +8,11 @@ mod countdown;
 #[path = "../../src/util.rs"]
 mod util;
 
+/// SD 卡协议里的纯逻辑：CRC 与 CSD 解析
+#[path = "../../src/driver/sdcard/proto.rs"]
+#[allow(dead_code, reason = "命令号等常量给固件用，host 侧只断言其中一部分")]
+mod sdcard_proto;
+
 use countdown::{
     CountDownItem, Unit, build_items, day_remaining_secs, release_remaining_secs,
     release_total_secs, week_remaining_secs, year_remaining_secs,
@@ -147,4 +152,67 @@ fn parse_usage_push_rejects() {
     assert!(util::parse_usage_push("laoda1 tok 101 77 13 1786000000", "tok").is_none()); // >100
     assert!(util::parse_usage_push("laoda1 tok 42 abc 13 1786000000", "tok").is_none()); // 非数字
     assert!(util::parse_usage_push("laoda1 tok 42 77 13 -5", "tok").is_none()); // 负 epoch
+}
+
+// ---- SD 卡协议（src/driver/sdcard/proto.rs）----
+
+mod sdcard {
+    use crate::sdcard_proto::*;
+
+    /// SD 规范里给出的两个标准帧：CMD0 的 CRC 是 0x95，CMD8(0x1AA) 是 0x87
+    #[test]
+    fn known_command_frames() {
+        assert_eq!(command_frame(CMD0, 0), [0x40, 0, 0, 0, 0, 0x95]);
+        assert_eq!(command_frame(CMD8, 0x1AA), [0x48, 0, 0, 0x01, 0xAA, 0x87]);
+        // 起始位 01 + 6 位命令号
+        assert_eq!(command_frame(CMD17, 0x0000_2000)[0], 0x51);
+    }
+
+    #[test]
+    fn crc16_vectors() {
+        assert_eq!(crc16(&[0u8; BLOCK_SIZE]), 0x0000);
+        assert_eq!(crc16(&[0xFFu8; BLOCK_SIZE]), 0x7FA1);
+        assert_eq!(crc16(&[0x00, 0x01, 0x02, 0x03]), 0x6131);
+    }
+
+    /// SDHC 卡的真实 CSD：v2，C_SIZE = 0x00EDC8 = 60872 → 约 32GB
+    #[test]
+    fn csd_v2_capacity() {
+        let csd = [
+            0x40, 0x0E, 0x00, 0x32, 0x5B, 0x59, 0x00, 0x00, 0xED, 0xC8, 0x7F, 0x80, 0x0A, 0x40,
+            0x40, 0x00,
+        ];
+        assert_eq!(csd_field(&csd, 126, 2), 1);
+        assert_eq!(csd_field(&csd, 48, 22), 60872);
+        assert_eq!(csd_block_count(&csd), Some(60_873 * 1024));
+    }
+
+    /// 手工编码的 v1 CSD：READ_BL_LEN=9、C_SIZE=3751、C_SIZE_MULT=7
+    /// → (3751+1) << 9 = 1_921_024 块 ≈ 983MB
+    #[test]
+    fn csd_v1_capacity() {
+        let csd = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x59, 0x03, 0xA9, 0xC0, 0x03, 0x80, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(csd_field(&csd, 126, 2), 0);
+        assert_eq!(csd_field(&csd, 80, 4), 9);
+        assert_eq!(csd_field(&csd, 62, 12), 3751);
+        assert_eq!(csd_field(&csd, 47, 3), 7);
+        assert_eq!(csd_block_count(&csd), Some(1_921_024));
+    }
+
+    /// READ_BL_LEN=10 的老卡：一个单元 1KB，折算成 512B 块要再乘 2
+    #[test]
+    fn csd_v1_read_bl_len_10() {
+        let mut csd = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x5A, 0x03, 0xA9, 0xC0, 0x03, 0x80, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(csd_field(&csd, 80, 4), 10);
+        assert_eq!(csd_block_count(&csd), Some(1_921_024 * 2));
+        // CSD v3 及以后没定义，不猜
+        csd[0] = 0xC0;
+        assert_eq!(csd_block_count(&csd), None);
+    }
 }

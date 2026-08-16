@@ -23,7 +23,12 @@ pub fn new(
     embassy_net::Runner<'static, Interface<'static>>,
 ) {
     let resources = RESOURCES.init(embassy_net::StackResources::new());
-    embassy_net::new(driver, embassy_net::Config::dhcpv4(Default::default()), resources, RANDOM_SEED)
+    embassy_net::new(
+        driver,
+        embassy_net::Config::dhcpv4(Default::default()),
+        resources,
+        RANDOM_SEED,
+    )
 }
 
 /// 协议栈 runner，永不退出。DHCP 在 runner 内处理，断线重连无需额外处理。

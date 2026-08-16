@@ -37,7 +37,9 @@ mdns-proto = { version = "0.3", default-features = false, features = ["alloc"] }
 rand_core = { version = "0.10", default-features = false }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
-esp-alloc = "0.10.0"
+# internal-heap-stats：开启 HeapStats::max_usage（峰值），crate::heap 周期上报
+# 依赖它来定堆尺寸。代价是每次 alloc/free 多几条整数指令，本机分配极少可忽略。
+esp-alloc = { version = "0.10.0", features = ["internal-heap-stats"] }
 esp-backtrace = { version = "0.19.0", features = [
   "esp32c6",
   "panic-handler",
@@ -62,9 +64,9 @@ smoltcp = { version = "0.13.0", default-features = false, features = [
   "proto-dhcpv4",
   "proto-dns",
   "proto-ipv4",
+  # 不开 socket-icmp / socket-raw：本机只用 UDP/TCP（DHCP/DNS/SNTP/push/mDNS），
+  # 且 ping 应答由 auto-icmp-echo-reply 控制、与 socket-icmp 无关（本来也没开）。
   "socket-dns",
-  "socket-icmp",
-  "socket-raw",
   "socket-tcp",
   "socket-udp",
 ] }
@@ -79,6 +81,23 @@ font-maker-core = { git = "https://github.com/longfangsong/embedded-graphics-fon
 embedded-hal       = "1.0.0"
 embedded-hal-async = "1.0.0"
 embassy-embedded-hal = "0.6.0"
+
+# TF 卡文件 IO（设计文档 §17）。四个 crate 同属 MabezDev/embedded-fatfs 仓库：
+# embedded-fatfs 只在 crates.io 上占了个 0.0.0 的坑，真正的版本只发在 git 上；
+# block-device-* 的已发布版本卡在 embedded-io-async 0.6，和 embedded-fatfs（0.7）
+# 对不上，所以四个一起从同一个 rev 取，锁死 commit 保证可复现。
+# embedded-fatfs 关掉默认 feature：chrono 要 std 时钟（时间由 device::tf 的
+# TimeProvider 从 NTP 时钟取），unicode 只影响非 ASCII 文件名的大小写折叠，不值那点 flash。
+# alloc 是开的：没有它 DirEntry::file_name() 不存在，且 LFN 缓冲会变成 500 多字节的栈数组。
+embedded-fatfs = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "518528cc111fcf65c48abbdeb80735a38eada112", default-features = false, features = [
+  "alloc",
+  "lfn",
+  "log",
+] }
+block-device-driver = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "518528cc111fcf65c48abbdeb80735a38eada112" }
+block-device-adapters = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "518528cc111fcf65c48abbdeb80735a38eada112" }
+embedded-partitions = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "518528cc111fcf65c48abbdeb80735a38eada112" }
+aligned = "0.4.2"
 
 
 

@@ -41,13 +41,17 @@ const LABELS: [&str; GAUGE_COUNT] = ["Session", "Week", "Fable"];
 
 const GAUGE_SIZE: usize = 90;
 const GAUGE_BORDER: usize = 12;
-const LABEL_HEIGHT: i32 = 18;
 const GAUGE_TO_LABEL: i32 = 6;
 
-/// {仪表盘 + 文字} 整体垂直居中
-const BLOCK_HEIGHT: i32 = GAUGE_SIZE as i32 + GAUGE_TO_LABEL + LABEL_HEIGHT;
-const BLOCK_TOP: i32 = (SCREEN_HEIGHT as i32 - BLOCK_HEIGHT) / 2;
-const LABEL_TOP: i32 = BLOCK_TOP + GAUGE_SIZE as i32 + GAUGE_TO_LABEL;
+/// {仪表盘 + 文字} 整体垂直居中。
+/// 文字高度取字体 glyph box 的实际高度，换字体时排版自动跟着走。
+const fn block_top(label_height: i32) -> i32 {
+    (SCREEN_HEIGHT as i32 - (GAUGE_SIZE as i32 + GAUGE_TO_LABEL + label_height)) / 2
+}
+
+const fn label_top(label_height: i32) -> i32 {
+    block_top(label_height) + GAUGE_SIZE as i32 + GAUGE_TO_LABEL
+}
 
 /// 每组占据的横向宽度；除不尽的余量平分到两侧，保证左右留白对称
 const CELL_WIDTH: i32 = SCREEN_WIDTH as i32 / GAUGE_COUNT as i32;
@@ -86,6 +90,7 @@ impl ClaudeUsage {
         };
 
         let ascii = font::ascii_18();
+        let label_height = ascii.header.height as i32;
         let label_style = FontTextStyle::new(&ascii, text_color)
             .background_color(theme::BACKGROUND)
             .char_spacing(CHAR_SPACING);
@@ -96,7 +101,7 @@ impl ClaudeUsage {
 
         // 仪表盘是值类型，每帧按数据构造（与 count_down 的进度条同模式）
         for (i, label) in LABELS.iter().enumerate() {
-            let mut gauge = UsageGauge::new(gauge_origin(i), 0.0)
+            let mut gauge = UsageGauge::new(gauge_origin(i, label_height), 0.0)
                 .filled_part_color(fill_color)
                 .text_color(text_color);
             match data.freshness {
@@ -107,7 +112,7 @@ impl ClaudeUsage {
 
             Text::with_text_style(
                 truncate_to_width(&ascii, label, CELL_WIDTH as u32),
-                Point::new(cell_center_x(i), LABEL_TOP),
+                Point::new(cell_center_x(i), label_top(label_height)),
                 label_style.clone(),
                 centered,
             )
@@ -122,6 +127,9 @@ const fn cell_center_x(index: usize) -> i32 {
     CELLS_LEFT + CELL_WIDTH * index as i32 + CELL_WIDTH / 2
 }
 
-const fn gauge_origin(index: usize) -> Point {
-    Point::new(cell_center_x(index) - GAUGE_SIZE as i32 / 2, BLOCK_TOP)
+const fn gauge_origin(index: usize, label_height: i32) -> Point {
+    Point::new(
+        cell_center_x(index) - GAUGE_SIZE as i32 / 2,
+        block_top(label_height),
+    )
 }

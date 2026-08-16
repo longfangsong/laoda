@@ -5,11 +5,10 @@
 //! hick 引擎无"更新记录"API（只有 register/unregister），DHCP 换租约时 mDNS
 //! 会继续广播旧地址——家庭网络很少发生，重刷固件即修复。
 
-use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 
 use embassy_net::udp::{PacketMetadata, UdpSocket};
-use embassy_net::{Ipv4Address, IpListenEndpoint, Stack};
+use embassy_net::{IpListenEndpoint, Ipv4Address, Stack};
 use embassy_time::{Duration, Timer};
 use hick_embassy::MdnsState;
 use log::{error, info};
@@ -31,7 +30,10 @@ static TX_BUF: StaticCell<MaybeUninit<[u8; BUF]>> = StaticCell::new();
 static SCRATCH: StaticCell<MaybeUninit<[u8; BUF]>> = StaticCell::new();
 
 /// 每个调用点只执行一次（任务启动时），此后缓冲独占；初始值无意义（收发前由协议覆盖）。
-#[allow(clippy::mut_from_ref, reason = "StaticCell 内部用裸指针存放，init 后独占，同 embassy 官方示例")]
+#[allow(
+    clippy::mut_from_ref,
+    reason = "StaticCell 内部用裸指针存放，init 后独占，同 embassy 官方示例"
+)]
 fn init_buf(slot: &'static StaticCell<MaybeUninit<[u8; BUF]>>) -> &'static mut [u8] {
     // SAFETY: init 仅调用一次；MaybeUninit 无需初始化
     unsafe { slot.init(MaybeUninit::uninit()).assume_init_mut() }
@@ -93,7 +95,10 @@ pub async fn mdns_task(stack: Stack<'static>) -> ! {
         TX_META.init([PacketMetadata::EMPTY; 1]),
         init_buf(&TX_BUF),
     );
-    if let Err(e) = socket.bind(IpListenEndpoint { addr: None, port: MDNS_PORT }) {
+    if let Err(e) = socket.bind(IpListenEndpoint {
+        addr: None,
+        port: MDNS_PORT,
+    }) {
         error!("mDNS 绑定 :{MDNS_PORT} 失败: {e:?}");
         loop {
             Timer::after(Duration::from_secs(60)).await;
@@ -115,26 +120,11 @@ pub async fn mdns_task(stack: Stack<'static>) -> ! {
         120,
     );
     records.add_a(ip);
-    // 堆余量探测：能再分几个 1KB 块（全部立即归还）；esp-alloc 无 free-size API
-    let layout = core::alloc::Layout::from_size_align(1024, 8).unwrap();
-    let mut free_kb = 0;
-    let mut probes = Vec::new();
-    while free_kb < 32 {
-        match unsafe { alloc::alloc::alloc(layout) } {
-            ptr if ptr.is_null() => break,
-            ptr => probes.push(ptr),
-        }
-        free_kb += 1;
-    }
-    for p in probes {
-        unsafe { alloc::alloc::dealloc(p, layout) };
-    }
-    info!("mDNS 启动：剩余堆约 {} KB", free_kb.min(32));
+    // 堆用量见 crate::heap 的周期上报（用 esp-alloc 的 max_usage 看峰值，
+    // 比在这里探一次瞬时余量准）
     match state.register_service(ServiceSpec::new(records)) {
         Ok(_) => info!("mDNS 广播 laoda.local → {ip}"),
         Err(e) => error!("mDNS 注册服务失败: {e:?}"),
     }
-    state
-        .run(Some(&mut socket), None, init_buf(&SCRATCH))
-        .await
+    state.run(Some(&mut socket), None, init_buf(&SCRATCH)).await
 }
